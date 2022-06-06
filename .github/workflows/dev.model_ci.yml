@@ -27,8 +27,8 @@ jobs:
               --labels=cml-gpu \
               --single=true \
               --cloud-spot=false \
-              # --cloud-gpu=k80 \
-              # --cloud-hdd-size=50
+              --cloud-gpu=k80 \
+              --cloud-hdd-size=50
 
   training-testing:
     name: Training and Testing
