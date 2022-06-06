@@ -1,0 +1,101 @@
+name: Model CI
+
+# on:
+#   push:
+#     branches:
+#     - 'main'
+on: [push]
+
+env:
+  RASA_X_URL: 'http://rasa-x-ui.hishab.io'
+
+jobs:
+  deploy-runner:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: iterative/setup-cml@v1
+      - uses: actions/checkout@v2
+      - name: Deploy runner on EC2
+        env:
+          REPO_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+          GOOGLE_APPLICATION_CREDENTIALS_DATA: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_DATA }}
+        run: |
+          cml runner \
+              --cloud=gcp \
+              --cloud-region=us-central1-a \
+              --cloud-type=n1-highmem-2 \
+              --labels=cml-gpu \
+              --single=true \
+              --cloud-spot=false \
+              # --cloud-gpu=k80 \
+              # --cloud-hdd-size=50
+
+  training-testing:
+    name: Training and Testing
+    needs:
+      - deploy-runner
+    runs-on: [self-hosted, cml-gpu]
+    steps:
+      - uses: actions/checkout@v1
+      - name: Rasa Train and Test GitHub Action
+        uses: muntasir2000/rasa-train-test-gha@main
+        with:
+          rasa_image: rasa/rasa:3.1.1-full
+          requirements_file: requirements.txt
+          data_validate: true
+          rasa_train: true
+          cross_validation: false
+          rasa_test: true
+          test_type: all
+          publish_summary: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload model
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@master
+        with:
+          name: model
+          path: models
+          retention-days: 1
+
+  upload-model:
+    name: Upload the trained model to Rasa X
+    needs:
+    - training-testing
+    env:
+      MODEL_DIRECTORY: "models"
+
+    if: github.event_name == 'push' && (startsWith(github.event.ref, 'refs/tags') || github.ref == 'refs/heads/main')
+    runs-on: [self-hosted, linux]
+
+    steps:
+    - name: Download Model
+      uses: actions/download-artifact@v2
+      with:
+        name: model
+        path: ${{ env.MODEL_DIRECTORY }}
+
+    - name: Get path to model
+      run: |
+        ls -R
+        ls -la
+        echo "MODELNAME=${{ env.MODEL_DIRECTORY }}/$(ls ${{ env.MODEL_DIRECTORY }})" >> $GITHUB_ENV
+    - name: install dependencies
+      run: |
+        id -u
+        sudo apt install -y jq
+
+
+    - name: Upload Model to Rasa
+      env:
+        RASA_X_PASSWORD: ${{ secrets.RASA_X_ADMIN_PASSWORD }}
+        RASA_X_USERNAME: me
+      run: |
+        # Get token
+        RASA_X_TOKEN=$(curl -s --header "Content-Type: application/json" \
+          --request POST \
+          --data "{\"username\":\"${RASA_X_USERNAME}\",\"password\":\"${RASA_X_PASSWORD}\"}" \
+          ${{ env.RASA_X_URL }}/api/auth | jq -r .access_token)
+
+        # Upload model
+        curl -k --fail -F "model=@${MODELNAME}" -H "Authorization: Bearer ${RASA_X_TOKEN}" ${{ env.RASA_X_URL }}/api/projects/default/models
+
